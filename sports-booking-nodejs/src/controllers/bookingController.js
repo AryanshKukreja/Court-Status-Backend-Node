@@ -39,7 +39,7 @@ const getCourtStatus = async (req, res) => {
       Court.find({ sport: sportId }),
       Booking.find({
         date: bookingDate
-      }).populate(['court', 'time_slot'])
+      }).populate(['court', 'time_slot', 'user'])
     ]);
 
     console.log(`Found: ${sports.length} sports, ${timeSlots.length} time slots, ${courts.length} courts, ${bookings.length} bookings for date ${bookingDate}`);
@@ -60,7 +60,7 @@ const getCourtStatus = async (req, res) => {
     
     // Debug: Log each booking
     sportBookings.forEach(booking => {
-      console.log(`Booking: Court ${booking.court._id}, Slot ${booking.time_slot._id}, Status: ${booking.status}`);
+      console.log(`Booking: Court ${booking.court._id}, Slot ${booking.time_slot._id}, Status: ${booking.status}, Booking By: ${booking.booking_by || 'N/A'}`);
     });
 
     // Build court data structure with ALL SLOTS DEFAULTING TO AVAILABLE
@@ -77,7 +77,8 @@ const getCourtStatus = async (req, res) => {
         courtInfo.slots[slotId] = {
           id: slotId,
           time: slot.formatted_slot,
-          status: 'available' // DEFAULT STATUS
+          status: 'available', // DEFAULT STATUS
+          booking_by: null
         };
       });
 
@@ -92,6 +93,7 @@ const getCourtStatus = async (req, res) => {
             if (courtInfo.slots[slotId]) {
               console.log(`Setting court ${court.name} slot ${slotId} to ${booking.status}`);
               courtInfo.slots[slotId].status = booking.status;
+              courtInfo.slots[slotId].booking_by = booking.booking_by || null;
             }
           }
         }
@@ -125,13 +127,13 @@ const getCourtStatus = async (req, res) => {
 
 const updateBooking = async (req, res) => {
   try {
-    const { courtId, timeSlotId, status, date } = req.body;
+    const { courtId, timeSlotId, status, date, booking_by } = req.body;
     
     // Normalize the date to start of day to ensure consistency
     const bookingDate = Booking.normalizeDate(date ? new Date(date) : new Date());
 
     console.log('=== UPDATE BOOKING DEBUG ===');
-    console.log(`Request: court=${courtId}, slot=${timeSlotId}, status=${status}`);
+    console.log(`Request: court=${courtId}, slot=${timeSlotId}, status=${status}, booking_by=${booking_by}`);
     console.log(`Original date: ${date}, Normalized date: ${bookingDate}`);
     console.log(`User: ${req.user ? req.user.username : 'Not found'}`);
 
@@ -144,6 +146,15 @@ const updateBooking = async (req, res) => {
       });
     }
 
+    // Validate booking_by field when status is 'booked'
+    if (status === 'booked' && (!booking_by || booking_by.trim() === '')) {
+      console.log('❌ Missing booking_by field for booked status');
+      return res.status(400).json({
+        success: false,
+        error: 'booking_by field is required when status is booked'
+      });
+    }
+
     if (!req.user || !req.user._id) {
       console.log('❌ User not authenticated');
       return res.status(401).json({
@@ -152,7 +163,8 @@ const updateBooking = async (req, res) => {
       });
     }
 
-    const validStatuses = ['available', 'booked', 'maintenance'];
+    // Updated valid statuses (changed from 'maintenance' to 'closed')
+    const validStatuses = ['available', 'booked', 'closed'];
     if (!validStatuses.includes(status)) {
       console.log('❌ Invalid status:', status);
       return res.status(400).json({
@@ -215,22 +227,28 @@ const updateBooking = async (req, res) => {
         action = 'already_available';
       }
     } else {
+      const bookingData = {
+        court: courtId,
+        time_slot: timeSlot._id,
+        date: bookingDate,
+        status: status,
+        user: req.user._id
+      };
+
+      // Add booking_by field if status is 'booked'
+      if (status === 'booked') {
+        bookingData.booking_by = booking_by.trim();
+      }
+
       if (existingBooking) {
         console.log('📝 Updating existing booking');
-        existingBooking.status = status;
-        existingBooking.user = req.user._id;
+        Object.assign(existingBooking, bookingData);
         result = await existingBooking.save();
         console.log(`Update successful: ${result._id}, Status: ${result.status}`);
         action = 'updated';
       } else {
         console.log('➕ Creating new booking');
-        result = await Booking.create({
-          court: courtId,
-          time_slot: timeSlot._id,
-          date: bookingDate,
-          status: status,
-          user: req.user._id
-        });
+        result = await Booking.create(bookingData);
         console.log(`Create successful: ${result._id}, Status: ${result.status}`);
         action = 'created';
       }
@@ -252,6 +270,7 @@ const updateBooking = async (req, res) => {
       date: bookingDate.toISOString().split('T')[0],
       status: status,
       user: req.user.username,
+      booking_by: status === 'booked' ? booking_by : null,
       action: action
     };
 
@@ -300,13 +319,13 @@ const testDatabaseOperations = async (req, res) => {
     const testDate = Booking.normalizeDate(new Date());
     console.log(`Testing with Court: ${court.name}, TimeSlot: ${timeSlot.formatted_slot}, Date: ${testDate}`);
     
-    // Test 1: Create a booking
+    // Test 1: Create a booking (using 'closed' instead of 'maintenance')
     console.log('Test 1: Creating booking...');
     const testBooking = await Booking.create({
       court: court._id,
       time_slot: timeSlot._id,
       date: testDate,
-      status: 'maintenance',
+      status: 'closed',
       user: req.user._id
     });
     console.log(`✅ Booking created: ${testBooking._id}`);
@@ -323,6 +342,7 @@ const testDatabaseOperations = async (req, res) => {
     // Test 3: Update the booking
     console.log('Test 3: Updating booking...');
     foundBooking.status = 'booked';
+    foundBooking.booking_by = 'Test User';
     await foundBooking.save();
     console.log(`✅ Booking updated to: ${foundBooking.status}`);
     

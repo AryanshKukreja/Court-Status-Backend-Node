@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
-const bookingStatusEnum = ['available', 'booked', 'maintenance'];
+// Change the enum from 'maintenance' to 'closed'
+const bookingStatusEnum = ['available', 'booked', 'closed'];
 
 const bookingSchema = new mongoose.Schema({
   court: {
@@ -26,6 +27,14 @@ const bookingSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
+  },
+  // Add the new booking_by field
+  booking_by: {
+    type: String,
+    required: function() {
+      return this.status === 'booked';
+    },
+    trim: true
   }
 }, {
   timestamps: true,
