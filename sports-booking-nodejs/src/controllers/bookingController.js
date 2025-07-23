@@ -2,8 +2,10 @@ const Booking = require('../models/Booking');
 const Court = require('../models/Court');
 const TimeSlot = require('../models/TimeSlot');
 const Sport = require('../models/Sport');
+const s3Service = require('../services/s3Service');
 const moment = require('moment');
 
+// Get all time slots
 const getCourtStatus = async (req, res) => {
   try {
     const { sport, date } = req.query;
@@ -58,11 +60,6 @@ const getCourtStatus = async (req, res) => {
 
     console.log(`Filtered to ${sportBookings.length} bookings for sport ${sportId}`);
     
-    // Debug: Log each booking
-    sportBookings.forEach(booking => {
-      console.log(`Booking: Court ${booking.court._id}, Slot ${booking.time_slot._id}, Status: ${booking.status}, Booking By: ${booking.booking_by || 'N/A'}`);
-    });
-
     // Build court data structure with ALL SLOTS DEFAULTING TO AVAILABLE
     const courtData = courts.map(court => {
       const courtInfo = {
@@ -78,7 +75,9 @@ const getCourtStatus = async (req, res) => {
           id: slotId,
           time: slot.formatted_slot,
           status: 'available', // DEFAULT STATUS
-          booking_by: null
+          booking_by: null,
+          approval_photo_key: null,
+          approval_photo_url: null
         };
       });
 
@@ -94,6 +93,8 @@ const getCourtStatus = async (req, res) => {
               console.log(`Setting court ${court.name} slot ${slotId} to ${booking.status}`);
               courtInfo.slots[slotId].status = booking.status;
               courtInfo.slots[slotId].booking_by = booking.booking_by || null;
+              courtInfo.slots[slotId].approval_photo_key = booking.approval_photo_key || null;
+              courtInfo.slots[slotId].approval_photo_url = booking.approval_photo_url || null;
             }
           }
         }
@@ -125,6 +126,7 @@ const getCourtStatus = async (req, res) => {
   }
 };
 
+// Single booking update with S3
 const updateBooking = async (req, res) => {
   try {
     const { courtId, timeSlotId, status, date, booking_by } = req.body;
@@ -136,37 +138,43 @@ const updateBooking = async (req, res) => {
     console.log(`Request: court=${courtId}, slot=${timeSlotId}, status=${status}, booking_by=${booking_by}`);
     console.log(`Original date: ${date}, Normalized date: ${bookingDate}`);
     console.log(`User: ${req.user ? req.user.username : 'Not found'}`);
+    console.log(`Uploaded file: ${req.file ? req.file.key : 'None'}`);
 
     // Validation
     if (!courtId || !timeSlotId || !status) {
-      console.log('❌ Missing required fields');
       return res.status(400).json({
         success: false,
         error: 'Missing required fields: courtId, timeSlotId, status'
       });
     }
 
-    // Validate booking_by field when status is 'booked'
-    if (status === 'booked' && (!booking_by || booking_by.trim() === '')) {
-      console.log('❌ Missing booking_by field for booked status');
-      return res.status(400).json({
-        success: false,
-        error: 'booking_by field is required when status is booked'
-      });
+    // Validate booking_by field and approval photo when status is 'booked'
+    if (status === 'booked') {
+      if (!booking_by || booking_by.trim() === '') {
+        return res.status(400).json({
+          success: false,
+          error: 'booking_by field is required when status is booked'
+        });
+      }
+      
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'Approval photo is required when booking a slot'
+        });
+      }
     }
 
     if (!req.user || !req.user._id) {
-      console.log('❌ User not authenticated');
       return res.status(401).json({
         success: false,
         error: 'User not authenticated'
       });
     }
 
-    // Updated valid statuses (changed from 'maintenance' to 'closed')
+    // Valid statuses
     const validStatuses = ['available', 'booked', 'closed'];
     if (!validStatuses.includes(status)) {
-      console.log('❌ Invalid status:', status);
       return res.status(400).json({
         success: false,
         error: `Invalid status. Valid options: ${validStatuses.join(', ')}`
@@ -178,7 +186,6 @@ const updateBooking = async (req, res) => {
     const frontendSlotId = parseInt(timeSlotId);
     
     if (frontendSlotId < 1 || frontendSlotId > timeSlots.length) {
-      console.log('❌ Invalid slot ID:', frontendSlotId);
       return res.status(400).json({ 
         success: false,
         error: 'Invalid time slot ID' 
@@ -191,7 +198,6 @@ const updateBooking = async (req, res) => {
     // Verify court exists
     const court = await Court.findById(courtId);
     if (!court) {
-      console.log('❌ Court not found:', courtId);
       return res.status(400).json({ 
         success: false,
         error: 'Court not found' 
@@ -206,25 +212,35 @@ const updateBooking = async (req, res) => {
       date: bookingDate
     });
 
-    console.log(`Existing booking: ${existingBooking ? 'Found' : 'Not found'}`);
-    if (existingBooking) {
-      console.log(`Existing booking details: Status=${existingBooking.status}, Date=${existingBooking.date}`);
-    }
-
     let result;
     let action;
 
     if (status === 'available') {
       if (existingBooking) {
-        console.log('🗑️ Deleting existing booking to make available');
-        result = await Booking.deleteOne({
-          _id: existingBooking._id
-        });
-        console.log(`Delete result: ${result.deletedCount} document(s) deleted`);
+        // Delete the approval photo from S3 if it exists
+        if (existingBooking.approval_photo_key) {
+          try {
+            await s3Service.deleteFile(existingBooking.approval_photo_key);
+            console.log(`🗑️ Deleted approval photo from S3: ${existingBooking.approval_photo_key}`);
+          } catch (s3Error) {
+            console.error('Error deleting file from S3:', s3Error);
+          }
+        }
+        
+        result = await Booking.deleteOne({ _id: existingBooking._id });
         action = result.deletedCount > 0 ? 'deleted' : 'delete_failed';
       } else {
-        console.log('ℹ️ Slot already available (no booking exists)');
         action = 'already_available';
+      }
+      
+      // Delete uploaded file from S3 if status is available (cleanup)
+      if (req.file) {
+        try {
+          await s3Service.deleteFile(req.file.key);
+          console.log('🗑️ Cleaned up uploaded file from S3 as status is available');
+        } catch (s3Error) {
+          console.error('Error cleaning up uploaded file from S3:', s3Error);
+        }
       }
     } else {
       const bookingData = {
@@ -235,34 +251,33 @@ const updateBooking = async (req, res) => {
         user: req.user._id
       };
 
-      // Add booking_by field if status is 'booked'
+      // Add booking_by field and S3 photo info if status is 'booked'
       if (status === 'booked') {
         bookingData.booking_by = booking_by.trim();
+        bookingData.approval_photo_key = req.file.key;
+        bookingData.approval_photo_url = req.file.location;
+        bookingData.approval_photo_filename = req.file.originalname;
       }
 
       if (existingBooking) {
-        console.log('📝 Updating existing booking');
+        // Delete old approval photo from S3 if updating
+        if (existingBooking.approval_photo_key && req.file) {
+          try {
+            await s3Service.deleteFile(existingBooking.approval_photo_key);
+            console.log(`🗑️ Deleted old approval photo from S3: ${existingBooking.approval_photo_key}`);
+          } catch (s3Error) {
+            console.error('Error deleting old file from S3:', s3Error);
+          }
+        }
+        
         Object.assign(existingBooking, bookingData);
         result = await existingBooking.save();
-        console.log(`Update successful: ${result._id}, Status: ${result.status}`);
         action = 'updated';
       } else {
-        console.log('➕ Creating new booking');
         result = await Booking.create(bookingData);
-        console.log(`Create successful: ${result._id}, Status: ${result.status}`);
         action = 'created';
       }
     }
-
-    // Verify the change was persisted
-    const verificationBooking = await Booking.findOne({
-      court: courtId,
-      time_slot: timeSlot._id,
-      date: bookingDate
-    });
-
-    console.log(`Verification: ${verificationBooking ? `Found with status ${verificationBooking.status}` : 'Not found (available)'}`);
-    console.log('=== END DEBUG ===');
 
     const responseBooking = {
       court: court.name,
@@ -271,6 +286,8 @@ const updateBooking = async (req, res) => {
       status: status,
       user: req.user.username,
       booking_by: status === 'booked' ? booking_by : null,
+      approval_photo_url: status === 'booked' && req.file ? req.file.location : null,
+      approval_photo_key: status === 'booked' && req.file ? req.file.key : null,
       action: action
     };
 
@@ -282,11 +299,18 @@ const updateBooking = async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error updating booking:', error);
-    console.error('Error stack:', error.stack);
     
-    // Check if it's a duplicate key error
+    // Clean up uploaded file from S3 on error
+    if (req.file) {
+      try {
+        await s3Service.deleteFile(req.file.key);
+        console.log('🗑️ Cleaned up uploaded file from S3 due to error');
+      } catch (s3Error) {
+        console.error('Error cleaning up uploaded file from S3:', s3Error);
+      }
+    }
+    
     if (error.code === 11000) {
-      console.log('Duplicate key error - booking already exists');
       return res.status(400).json({ 
         success: false,
         error: 'Booking already exists for this court, time slot, and date' 
@@ -300,81 +324,373 @@ const updateBooking = async (req, res) => {
   }
 };
 
-// Add a test endpoint to verify database operations
-const testDatabaseOperations = async (req, res) => {
+// Bulk booking multiple slots with S3
+const bulkUpdateBookings = async (req, res) => {
   try {
-    console.log('=== DATABASE TEST ===');
+    const { courtId, timeSlotIds, status, date, booking_by } = req.body;
     
-    // Get a sample court and time slot
-    const court = await Court.findOne();
-    const timeSlot = await TimeSlot.findOne();
-    
-    if (!court || !timeSlot) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Need at least one court and one time slot for testing' 
+    // Parse timeSlotIds if it's a string
+    let parsedTimeSlotIds;
+    try {
+      parsedTimeSlotIds = typeof timeSlotIds === 'string' ? JSON.parse(timeSlotIds) : timeSlotIds;
+    } catch (parseError) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid timeSlotIds format'
       });
     }
-    
-    const testDate = Booking.normalizeDate(new Date());
-    console.log(`Testing with Court: ${court.name}, TimeSlot: ${timeSlot.formatted_slot}, Date: ${testDate}`);
-    
-    // Test 1: Create a booking (using 'closed' instead of 'maintenance')
-    console.log('Test 1: Creating booking...');
-    const testBooking = await Booking.create({
-      court: court._id,
-      time_slot: timeSlot._id,
-      date: testDate,
-      status: 'closed',
-      user: req.user._id
-    });
-    console.log(`✅ Booking created: ${testBooking._id}`);
-    
-    // Test 2: Find the booking
-    console.log('Test 2: Finding booking...');
-    const foundBooking = await Booking.findOne({
-      court: court._id,
-      time_slot: timeSlot._id,
-      date: testDate
-    });
-    console.log(`✅ Booking found: ${foundBooking ? foundBooking._id : 'Not found'}`);
-    
-    // Test 3: Update the booking
-    console.log('Test 3: Updating booking...');
-    foundBooking.status = 'booked';
-    foundBooking.booking_by = 'Test User';
-    await foundBooking.save();
-    console.log(`✅ Booking updated to: ${foundBooking.status}`);
-    
-    // Test 4: Delete the booking
-    console.log('Test 4: Deleting booking...');
-    const deleteResult = await Booking.deleteOne({ _id: foundBooking._id });
-    console.log(`✅ Booking deleted: ${deleteResult.deletedCount} document(s)`);
-    
-    // Test 5: Verify deletion
-    console.log('Test 5: Verifying deletion...');
-    const deletedBooking = await Booking.findById(foundBooking._id);
-    console.log(`✅ Verification: ${deletedBooking ? 'Still exists (ERROR)' : 'Successfully deleted'}`);
-    
-    console.log('=== TEST COMPLETE ===');
-    
-    res.json({ 
-      success: true, 
-      message: 'All database tests passed',
-      testResults: {
-        created: !!testBooking,
-        found: !!foundBooking,
-        updated: foundBooking.status === 'booked',
-        deleted: deleteResult.deletedCount === 1,
-        verified: !deletedBooking
+
+    // Normalize the date
+    const bookingDate = Booking.normalizeDate(date ? new Date(date) : new Date());
+
+    // Validation
+    if (!courtId || !parsedTimeSlotIds || !Array.isArray(parsedTimeSlotIds) || parsedTimeSlotIds.length === 0 || !status) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: courtId, timeSlotIds (array), status'
+      });
+    }
+
+    // Validate booking_by field and approval photo when status is 'booked'
+    if (status === 'booked') {
+      if (!booking_by || booking_by.trim() === '') {
+        return res.status(400).json({
+          success: false,
+          error: 'booking_by field is required when status is booked'
+        });
       }
-    });
-    
+      
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'Approval photo is required when booking slots'
+        });
+      }
+    }
+
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({
+        success: false,
+        error: 'User not authenticated'
+      });
+    }
+
+    // Validate status
+    const validStatuses = ['available', 'booked', 'closed'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid status. Valid options: ${validStatuses.join(', ')}`
+      });
+    }
+
+    // Get all time slots and verify court
+    const [timeSlots, court] = await Promise.all([
+      TimeSlot.find().sort({ hour: 1 }),
+      Court.findById(courtId)
+    ]);
+
+    if (!court) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Court not found' 
+      });
+    }
+
+    // Convert frontend slot IDs to actual time slots
+    const validTimeSlots = [];
+    for (const frontendSlotId of parsedTimeSlotIds) {
+      const slotIndex = parseInt(frontendSlotId) - 1;
+      if (slotIndex >= 0 && slotIndex < timeSlots.length) {
+        validTimeSlots.push({
+          frontendId: frontendSlotId,
+          timeSlot: timeSlots[slotIndex]
+        });
+      }
+    }
+
+    if (validTimeSlots.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid time slots found'
+      });
+    }
+
+    const results = [];
+    const errors = [];
+    let shouldDeleteUploadedFile = false;
+
+    // Process each time slot
+    for (const { frontendId, timeSlot } of validTimeSlots) {
+      try {
+        // Find existing booking
+        const existingBooking = await Booking.findOne({
+          court: courtId,
+          time_slot: timeSlot._id,
+          date: bookingDate
+        });
+
+        let result;
+        let action;
+
+        if (status === 'available') {
+          if (existingBooking) {
+            // Delete the approval photo from S3 if it exists
+            if (existingBooking.approval_photo_key) {
+              try {
+                await s3Service.deleteFile(existingBooking.approval_photo_key);
+              } catch (s3Error) {
+                console.error(`Error deleting S3 file for slot ${frontendId}:`, s3Error);
+              }
+            }
+            
+            result = await Booking.deleteOne({ _id: existingBooking._id });
+            action = result.deletedCount > 0 ? 'deleted' : 'delete_failed';
+          } else {
+            action = 'already_available';
+          }
+          shouldDeleteUploadedFile = true;
+        } else {
+          const bookingData = {
+            court: courtId,
+            time_slot: timeSlot._id,
+            date: bookingDate,
+            status: status,
+            user: req.user._id
+          };
+
+          // Add booking_by field and S3 photo info if status is 'booked'
+          if (status === 'booked') {
+            bookingData.booking_by = booking_by.trim();
+            // For bulk bookings, we'll use the same photo for all slots
+            bookingData.approval_photo_key = req.file.key;
+            bookingData.approval_photo_url = req.file.location;
+            bookingData.approval_photo_filename = req.file.originalname;
+          }
+
+          if (existingBooking) {
+            // Delete old approval photo from S3 if updating (only for the first slot to avoid multiple deletions of same file)
+            if (existingBooking.approval_photo_key && req.file && results.length === 0) {
+              try {
+                await s3Service.deleteFile(existingBooking.approval_photo_key);
+              } catch (s3Error) {
+                console.error('Error deleting old file from S3:', s3Error);
+              }
+            }
+            
+            Object.assign(existingBooking, bookingData);
+            result = await existingBooking.save();
+            action = 'updated';
+          } else {
+            result = await Booking.create(bookingData);
+            action = 'created';
+          }
+        }
+
+        results.push({
+          slotId: frontendId,
+          timeSlot: timeSlot.formatted_slot,
+          action: action,
+          success: true
+        });
+
+      } catch (slotError) {
+        errors.push({
+          slotId: frontendId,
+          timeSlot: timeSlot.formatted_slot,
+          error: slotError.message
+        });
+      }
+    }
+
+    // Clean up uploaded file from S3 if needed
+    if (shouldDeleteUploadedFile && req.file) {
+      try {
+        await s3Service.deleteFile(req.file.key);
+      } catch (s3Error) {
+        console.error('Error cleaning up uploaded file from S3:', s3Error);
+      }
+    } else if (results.length === 0 && req.file) {
+      try {
+        await s3Service.deleteFile(req.file.key);
+      } catch (s3Error) {
+        console.error('Error cleaning up uploaded file from S3:', s3Error);
+      }
+    }
+
+    const response = {
+      success: results.length > 0,
+      message: `Bulk update completed: ${results.length} successful, ${errors.length} failed`,
+      results: results,
+      errors: errors,
+      totalSlots: parsedTimeSlotIds.length,
+      successfulSlots: results.length,
+      failedSlots: errors.length
+    };
+
+    // Return appropriate status code
+    if (results.length === 0) {
+      return res.status(400).json(response);
+    } else if (errors.length > 0) {
+      return res.status(207).json(response); // 207 Multi-Status
+    } else {
+      return res.json(response);
+    }
+
   } catch (error) {
-    console.error('❌ Database test failed:', error);
+    console.error('❌ Error in bulk update bookings:', error);
+    
+    // Clean up uploaded file from S3 on error
+    if (req.file) {
+      try {
+        await s3Service.deleteFile(req.file.key);
+      } catch (s3Error) {
+        console.error('Error cleaning up uploaded file from S3:', s3Error);
+      }
+    }
+    
     res.status(500).json({ 
-      success: false, 
-      error: `Database test failed: ${error.message}` 
+      success: false,
+      error: `Failed to bulk update bookings: ${error.message}` 
+    });
+  }
+};
+
+// Get approval photo with pre-signed URL
+// Get approval photo with pre-signed URL
+// Replace these two functions in your bookingController.js
+
+// Get approval photo with pre-signed URL
+// Replace these two functions in your bookingController.js
+
+// Get approval photo with pre-signed URL
+const getApprovalPhoto = async (req, res) => {
+  try {
+    // Extract the filename and construct the full S3 key
+    const filename = req.params.filename;
+    const key = `approval-photos/${filename}`;
+    
+    console.log(`Getting approval photo for key: ${key}`);
+    
+    // Validate that filename exists
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing filename parameter'
+      });
+    }
+
+    // Check if file exists in S3
+    const exists = await s3Service.fileExists(key);
+    if (!exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Photo not found in S3'
+      });
+    }
+
+    // Generate pre-signed URL (valid for 1 hour)
+    const presignedUrl = await s3Service.getPresignedUrl(key, 3600);
+    
+    res.json({
+      success: true,
+      url: presignedUrl,
+      key: key,
+      expiresIn: 3600
+    });
+  } catch (error) {
+    console.error('Error getting approval photo:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get photo URL'
+    });
+  }
+};
+
+// Get approval photo directly (redirect to S3)
+const getApprovalPhotoRedirect = async (req, res) => {
+  try {
+    // Extract the filename and construct the full S3 key
+    const filename = req.params.filename;
+    const key = `approval-photos/${filename}`;
+    
+    console.log(`Redirecting to approval photo for key: ${key}`);
+    
+    // Validate that filename exists
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing filename parameter'
+      });
+    }
+
+    // Check if file exists in S3
+    const exists = await s3Service.fileExists(key);
+    if (!exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Photo not found in S3'
+      });
+    }
+
+    // Generate pre-signed URL and redirect
+    const presignedUrl = await s3Service.getPresignedUrl(key, 3600);
+    res.redirect(presignedUrl);
+  } catch (error) {
+    console.error('Error redirecting to approval photo:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to access photo'
+    });
+  }
+};
+// Admin endpoint to list all approval photos
+const listApprovalPhotos = async (req, res) => {
+  try {
+    const { page = 1, limit = 50 } = req.query;
+    
+    // List files from S3
+    const files = await s3Service.listFiles('approval-photos/', parseInt(limit) * parseInt(page));
+    
+    // Get bookings that have approval photos
+    const bookings = await Booking.find({
+      approval_photo_key: { $exists: true, $ne: null }
+    })
+    .populate(['court', 'time_slot', 'user'])
+    .sort({ createdAt: -1 });
+
+    // Combine S3 file info with booking info
+    const photosWithBookings = files.map(file => {
+      const booking = bookings.find(b => b.approval_photo_key === file.Key);
+      return {
+        key: file.Key,
+        size: file.Size,
+        lastModified: file.LastModified,
+        booking: booking ? {
+          id: booking._id,
+          court: booking.court?.name,
+          timeSlot: booking.time_slot?.formatted_slot,
+          date: booking.date,
+          bookingBy: booking.booking_by,
+          user: booking.user?.username,
+          status: booking.status
+        } : null
+      };
+    });
+
+    res.json({
+      success: true,
+      photos: photosWithBookings,
+      totalFiles: files.length,
+      totalBookings: bookings.length,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+  } catch (error) {
+    console.error('Error listing approval photos:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to list photos'
     });
   }
 };
@@ -382,5 +698,8 @@ const testDatabaseOperations = async (req, res) => {
 module.exports = {
   getCourtStatus,
   updateBooking,
-  testDatabaseOperations
+  bulkUpdateBookings,
+  getApprovalPhoto,
+  getApprovalPhotoRedirect,
+  listApprovalPhotos
 };

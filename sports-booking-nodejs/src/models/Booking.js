@@ -1,6 +1,5 @@
 const mongoose = require('mongoose');
 
-// Change the enum from 'maintenance' to 'closed'
 const bookingStatusEnum = ['available', 'booked', 'closed'];
 
 const bookingSchema = new mongoose.Schema({
@@ -28,13 +27,33 @@ const bookingSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
-  // Add the new booking_by field
   booking_by: {
     type: String,
     required: function() {
       return this.status === 'booked';
     },
     trim: true
+  },
+  // S3 key for the approval photo
+  approval_photo_key: {
+    type: String,
+    required: function() {
+      return this.status === 'booked';
+    }
+  },
+  // S3 URL for the approval photo
+  approval_photo_url: {
+    type: String,
+    required: function() {
+      return this.status === 'booked';
+    }
+  },
+  // Store original filename for reference
+  approval_photo_filename: {
+    type: String,
+    required: function() {
+      return this.status === 'booked';
+    }
   }
 }, {
   timestamps: true,
