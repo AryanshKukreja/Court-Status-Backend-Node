@@ -4,12 +4,12 @@ const { s3Client } = require('../config/aws');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 
-// Configure multer with S3 storage using AWS SDK v3
+// Configure multer with S3 storage using AWS SDK v3 and ACLs
 const upload = multer({
   storage: multerS3({
     s3: s3Client, // Use the S3Client from AWS SDK v3
     bucket: process.env.AWS_S3_BUCKET_NAME,
-    acl: 'private', // Private access - will use pre-signed URLs
+    acl: 'public-read', // Make files publicly readable via ACL
     key: function (req, file, cb) {
       // Create unique filename with UUID and timestamp
       const uniqueId = uuidv4();

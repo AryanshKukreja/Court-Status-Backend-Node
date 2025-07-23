@@ -5,6 +5,7 @@ const Sport = require('../models/Sport');
 const s3Service = require('../services/s3Service');
 const moment = require('moment');
 
+
 // Get all time slots
 const getCourtStatus = async (req, res) => {
   try {
@@ -13,7 +14,9 @@ const getCourtStatus = async (req, res) => {
     // Normalize the date to start of day
     const bookingDate = Booking.normalizeDate(date ? new Date(date) : new Date());
 
+
     console.log(`Fetching court status for sport: ${sport}, normalized date: ${bookingDate}`);
+
 
     // Get sport or default to first available
     let sportId = sport;
@@ -25,6 +28,7 @@ const getCourtStatus = async (req, res) => {
       sportId = firstSport._id;
     }
 
+
     // Ensure time slots exist
     const timeSlotCount = await TimeSlot.countDocuments();
     if (timeSlotCount === 0) {
@@ -33,6 +37,7 @@ const getCourtStatus = async (req, res) => {
         error: 'No time slots available. Please create time slots first.' 
       });
     }
+
 
     // Get all required data
     const [sports, timeSlots, courts, bookings] = await Promise.all([
@@ -44,7 +49,9 @@ const getCourtStatus = async (req, res) => {
       }).populate(['court', 'time_slot', 'user'])
     ]);
 
+
     console.log(`Found: ${sports.length} sports, ${timeSlots.length} time slots, ${courts.length} courts, ${bookings.length} bookings for date ${bookingDate}`);
+
 
     // Check if courts exist for this sport
     if (courts.length === 0) {
@@ -53,10 +60,12 @@ const getCourtStatus = async (req, res) => {
       });
     }
 
+
     // Filter bookings for selected sport
     const sportBookings = bookings.filter(booking => 
       booking.court && courts.some(court => court._id.toString() === booking.court._id.toString())
     );
+
 
     console.log(`Filtered to ${sportBookings.length} bookings for sport ${sportId}`);
     
@@ -67,6 +76,7 @@ const getCourtStatus = async (req, res) => {
         name: court.name,
         slots: {}
       };
+
 
       // Create slot structure for each time slot - DEFAULT TO AVAILABLE
       timeSlots.forEach((slot, index) => {
@@ -80,6 +90,7 @@ const getCourtStatus = async (req, res) => {
           approval_photo_url: null
         };
       });
+
 
       // Update with actual booking statuses ONLY if booking exists
       sportBookings.forEach(booking => {
@@ -100,14 +111,17 @@ const getCourtStatus = async (req, res) => {
         }
       });
 
+
       return courtInfo;
     });
+
 
     // Build time slots data
     const timeSlotsData = timeSlots.map((slot, index) => ({
       id: index + 1,
       formatted_slot: slot.formatted_slot
     }));
+
 
     const responseData = {
       date: bookingDate.toISOString().split('T')[0],
@@ -118,6 +132,7 @@ const getCourtStatus = async (req, res) => {
       courts: courtData
     };
 
+
     console.log(`Returning court status with ${courtData.length} courts`);
     res.json(responseData);
   } catch (error) {
@@ -125,6 +140,7 @@ const getCourtStatus = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
 
 // Single booking update with S3
 const updateBooking = async (req, res) => {
@@ -134,11 +150,13 @@ const updateBooking = async (req, res) => {
     // Normalize the date to start of day to ensure consistency
     const bookingDate = Booking.normalizeDate(date ? new Date(date) : new Date());
 
+
     console.log('=== UPDATE BOOKING DEBUG ===');
     console.log(`Request: court=${courtId}, slot=${timeSlotId}, status=${status}, booking_by=${booking_by}`);
     console.log(`Original date: ${date}, Normalized date: ${bookingDate}`);
     console.log(`User: ${req.user ? req.user.username : 'Not found'}`);
     console.log(`Uploaded file: ${req.file ? req.file.key : 'None'}`);
+
 
     // Validation
     if (!courtId || !timeSlotId || !status) {
@@ -147,6 +165,7 @@ const updateBooking = async (req, res) => {
         error: 'Missing required fields: courtId, timeSlotId, status'
       });
     }
+
 
     // Validate booking_by field and approval photo when status is 'booked'
     if (status === 'booked') {
@@ -165,12 +184,14 @@ const updateBooking = async (req, res) => {
       }
     }
 
+
     if (!req.user || !req.user._id) {
       return res.status(401).json({
         success: false,
         error: 'User not authenticated'
       });
     }
+
 
     // Valid statuses
     const validStatuses = ['available', 'booked', 'closed'];
@@ -180,6 +201,7 @@ const updateBooking = async (req, res) => {
         error: `Invalid status. Valid options: ${validStatuses.join(', ')}`
       });
     }
+
 
     // Convert frontend slot ID to actual time slot
     const timeSlots = await TimeSlot.find().sort({ hour: 1 });
@@ -195,6 +217,7 @@ const updateBooking = async (req, res) => {
     const timeSlot = timeSlots[frontendSlotId - 1];
     console.log(`✅ Time slot found: ${timeSlot.formatted_slot} (ID: ${timeSlot._id})`);
 
+
     // Verify court exists
     const court = await Court.findById(courtId);
     if (!court) {
@@ -205,6 +228,7 @@ const updateBooking = async (req, res) => {
     }
     console.log(`✅ Court found: ${court.name}`);
 
+
     // Find existing booking with exact date match
     const existingBooking = await Booking.findOne({
       court: courtId,
@@ -212,8 +236,10 @@ const updateBooking = async (req, res) => {
       date: bookingDate
     });
 
+
     let result;
     let action;
+
 
     if (status === 'available') {
       if (existingBooking) {
@@ -251,6 +277,7 @@ const updateBooking = async (req, res) => {
         user: req.user._id
       };
 
+
       // Add booking_by field and S3 photo info if status is 'booked'
       if (status === 'booked') {
         bookingData.booking_by = booking_by.trim();
@@ -258,6 +285,7 @@ const updateBooking = async (req, res) => {
         bookingData.approval_photo_url = req.file.location;
         bookingData.approval_photo_filename = req.file.originalname;
       }
+
 
       if (existingBooking) {
         // Delete old approval photo from S3 if updating
@@ -279,6 +307,7 @@ const updateBooking = async (req, res) => {
       }
     }
 
+
     const responseBooking = {
       court: court.name,
       time_slot: timeSlot.formatted_slot,
@@ -291,11 +320,13 @@ const updateBooking = async (req, res) => {
       action: action
     };
 
+
     return res.json({ 
       success: true, 
       message: `Court ${court.name} slot ${timeSlot.formatted_slot} ${action} - status: ${status}`,
       booking: responseBooking 
     });
+
 
   } catch (error) {
     console.error('❌ Error updating booking:', error);
@@ -324,6 +355,7 @@ const updateBooking = async (req, res) => {
   }
 };
 
+
 // Bulk booking multiple slots with S3
 const bulkUpdateBookings = async (req, res) => {
   try {
@@ -340,8 +372,10 @@ const bulkUpdateBookings = async (req, res) => {
       });
     }
 
+
     // Normalize the date
     const bookingDate = Booking.normalizeDate(date ? new Date(date) : new Date());
+
 
     // Validation
     if (!courtId || !parsedTimeSlotIds || !Array.isArray(parsedTimeSlotIds) || parsedTimeSlotIds.length === 0 || !status) {
@@ -350,6 +384,7 @@ const bulkUpdateBookings = async (req, res) => {
         error: 'Missing required fields: courtId, timeSlotIds (array), status'
       });
     }
+
 
     // Validate booking_by field and approval photo when status is 'booked'
     if (status === 'booked') {
@@ -368,12 +403,14 @@ const bulkUpdateBookings = async (req, res) => {
       }
     }
 
+
     if (!req.user || !req.user._id) {
       return res.status(401).json({
         success: false,
         error: 'User not authenticated'
       });
     }
+
 
     // Validate status
     const validStatuses = ['available', 'booked', 'closed'];
@@ -384,11 +421,13 @@ const bulkUpdateBookings = async (req, res) => {
       });
     }
 
+
     // Get all time slots and verify court
     const [timeSlots, court] = await Promise.all([
       TimeSlot.find().sort({ hour: 1 }),
       Court.findById(courtId)
     ]);
+
 
     if (!court) {
       return res.status(400).json({ 
@@ -396,6 +435,7 @@ const bulkUpdateBookings = async (req, res) => {
         error: 'Court not found' 
       });
     }
+
 
     // Convert frontend slot IDs to actual time slots
     const validTimeSlots = [];
@@ -409,6 +449,7 @@ const bulkUpdateBookings = async (req, res) => {
       }
     }
 
+
     if (validTimeSlots.length === 0) {
       return res.status(400).json({
         success: false,
@@ -416,9 +457,11 @@ const bulkUpdateBookings = async (req, res) => {
       });
     }
 
+
     const results = [];
     const errors = [];
     let shouldDeleteUploadedFile = false;
+
 
     // Process each time slot
     for (const { frontendId, timeSlot } of validTimeSlots) {
@@ -430,8 +473,10 @@ const bulkUpdateBookings = async (req, res) => {
           date: bookingDate
         });
 
+
         let result;
         let action;
+
 
         if (status === 'available') {
           if (existingBooking) {
@@ -459,6 +504,7 @@ const bulkUpdateBookings = async (req, res) => {
             user: req.user._id
           };
 
+
           // Add booking_by field and S3 photo info if status is 'booked'
           if (status === 'booked') {
             bookingData.booking_by = booking_by.trim();
@@ -467,6 +513,7 @@ const bulkUpdateBookings = async (req, res) => {
             bookingData.approval_photo_url = req.file.location;
             bookingData.approval_photo_filename = req.file.originalname;
           }
+
 
           if (existingBooking) {
             // Delete old approval photo from S3 if updating (only for the first slot to avoid multiple deletions of same file)
@@ -487,12 +534,14 @@ const bulkUpdateBookings = async (req, res) => {
           }
         }
 
+
         results.push({
           slotId: frontendId,
           timeSlot: timeSlot.formatted_slot,
           action: action,
           success: true
         });
+
 
       } catch (slotError) {
         errors.push({
@@ -502,6 +551,7 @@ const bulkUpdateBookings = async (req, res) => {
         });
       }
     }
+
 
     // Clean up uploaded file from S3 if needed
     if (shouldDeleteUploadedFile && req.file) {
@@ -518,6 +568,7 @@ const bulkUpdateBookings = async (req, res) => {
       }
     }
 
+
     const response = {
       success: results.length > 0,
       message: `Bulk update completed: ${results.length} successful, ${errors.length} failed`,
@@ -528,6 +579,7 @@ const bulkUpdateBookings = async (req, res) => {
       failedSlots: errors.length
     };
 
+
     // Return appropriate status code
     if (results.length === 0) {
       return res.status(400).json(response);
@@ -536,6 +588,7 @@ const bulkUpdateBookings = async (req, res) => {
     } else {
       return res.json(response);
     }
+
 
   } catch (error) {
     console.error('❌ Error in bulk update bookings:', error);
@@ -556,65 +609,13 @@ const bulkUpdateBookings = async (req, res) => {
   }
 };
 
-// Get approval photo with pre-signed URL
-// Get approval photo with pre-signed URL
-// Replace these two functions in your bookingController.js
-
-// Get approval photo with pre-signed URL
-// Replace these two functions in your bookingController.js
-
-// Get approval photo with pre-signed URL
-const getApprovalPhoto = async (req, res) => {
-  try {
-    // Extract the filename and construct the full S3 key
-    const filename = req.params.filename;
-    const key = `approval-photos/${filename}`;
-    
-    console.log(`Getting approval photo for key: ${key}`);
-    
-    // Validate that filename exists
-    if (!filename) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing filename parameter'
-      });
-    }
-
-    // Check if file exists in S3
-    const exists = await s3Service.fileExists(key);
-    if (!exists) {
-      return res.status(404).json({
-        success: false,
-        error: 'Photo not found in S3'
-      });
-    }
-
-    // Generate pre-signed URL (valid for 1 hour)
-    const presignedUrl = await s3Service.getPresignedUrl(key, 3600);
-    
-    res.json({
-      success: true,
-      url: presignedUrl,
-      key: key,
-      expiresIn: 3600
-    });
-  } catch (error) {
-    console.error('Error getting approval photo:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get photo URL'
-    });
-  }
-};
 
 // Get approval photo directly (redirect to S3)
 const getApprovalPhotoRedirect = async (req, res) => {
   try {
-    // Extract the filename and construct the full S3 key
     const filename = req.params.filename;
-    const key = `approval-photos/${filename}`;
     
-    console.log(`Redirecting to approval photo for key: ${key}`);
+    console.log(`Redirecting to approval photo for filename: ${filename}`);
     
     // Validate that filename exists
     if (!filename) {
@@ -624,18 +625,16 @@ const getApprovalPhotoRedirect = async (req, res) => {
       });
     }
 
-    // Check if file exists in S3
-    const exists = await s3Service.fileExists(key);
-    if (!exists) {
-      return res.status(404).json({
-        success: false,
-        error: 'Photo not found in S3'
-      });
-    }
-
-    // Generate pre-signed URL and redirect
-    const presignedUrl = await s3Service.getPresignedUrl(key, 3600);
-    res.redirect(presignedUrl);
+    // Construct direct S3 URL (since bucket is public)
+    const bucketName = process.env.AWS_S3_BUCKET_NAME;
+    const region = process.env.AWS_REGION;
+    const key = `approval-photos/${filename}`;
+    
+    const directUrl = `https://${bucketName}.s3.${region}.amazonaws.com/${key}`;
+    
+    console.log(`Redirecting to: ${directUrl}`);
+    res.redirect(directUrl);
+    
   } catch (error) {
     console.error('Error redirecting to approval photo:', error);
     res.status(500).json({
@@ -644,6 +643,55 @@ const getApprovalPhotoRedirect = async (req, res) => {
     });
   }
 };
+
+// Get approval photo with direct URL (no presigned URL needed for public buckets)
+const getApprovalPhoto = async (req, res) => {
+  try {
+    const filename = req.params.filename;
+    const key = `approval-photos/${filename}`;
+    
+    console.log(`Getting approval photo for key: ${key}`);
+    
+    if (!filename) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing filename parameter'
+      });
+    }
+
+    // Check if file exists
+    console.log('Checking if file exists...');
+    const exists = await s3Service.fileExists(key);
+    console.log('File exists result:', exists);
+    
+    if (!exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Photo not found in S3'
+      });
+    }
+
+    // Return direct S3 URL (since bucket is public)
+    const bucketName = process.env.AWS_S3_BUCKET_NAME;
+    const region = process.env.AWS_REGION;
+    const directUrl = `https://${bucketName}.s3.${region}.amazonaws.com/${key}`;
+    
+    res.json({
+      success: true,
+      url: directUrl,
+      key: key,
+      isPublic: true
+    });
+  } catch (error) {
+    console.error('Error getting approval photo:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get photo URL',
+      details: error.message
+    });
+  }
+};
+
 // Admin endpoint to list all approval photos
 const listApprovalPhotos = async (req, res) => {
   try {
@@ -660,10 +708,16 @@ const listApprovalPhotos = async (req, res) => {
     .sort({ createdAt: -1 });
 
     // Combine S3 file info with booking info
+    const bucketName = process.env.AWS_S3_BUCKET_NAME;
+    const region = process.env.AWS_REGION;
+    
     const photosWithBookings = files.map(file => {
       const booking = bookings.find(b => b.approval_photo_key === file.Key);
+      const directUrl = `https://${bucketName}.s3.${region}.amazonaws.com/${file.Key}`;
+      
       return {
         key: file.Key,
+        url: directUrl,
         size: file.Size,
         lastModified: file.LastModified,
         booking: booking ? {
@@ -694,6 +748,7 @@ const listApprovalPhotos = async (req, res) => {
     });
   }
 };
+
 
 module.exports = {
   getCourtStatus,
